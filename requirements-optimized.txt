@@ -1,0 +1,27 @@
+# Core dependencies (existing)
+aiogram==3.13.1
+telethon==1.36.0
+python-dotenv==1.0.1
+requests==2.31.0
+rich==13.9.2
+
+# Performance optimization dependencies (new)
+aiohttp==3.10.11
+aiofiles==24.1.0
+
+# Caching & Queue (optional - uncomment untuk production)
+# redis==5.0.1
+# celery==5.3.4
+
+# Monitoring & Logging (optional)
+# prometheus-client==0.19.0
+# sentry-sdk==1.40.0
+
+# Database untuk tracking (optional)
+# sqlalchemy==2.0.25
+# asyncpg==0.29.0
+
+# Testing (optional)
+# pytest==7.4.3
+# pytest-asyncio==0.21.1
+# pytest-cov==4.1.0
