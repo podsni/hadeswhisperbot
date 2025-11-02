@@ -1,7 +1,7 @@
 """Export service for generating transcript files in multiple formats."""
 
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -138,6 +138,44 @@ class ExportService:
             srt_lines.append("")
 
         return "\n".join(srt_lines)
+
+    @staticmethod
+    def to_srt_from_segments(
+        segments: List[Dict[str, Any]],
+        translated_segments: List[str],
+    ) -> str:
+        """
+        Export SRT using existing segment timing with translated text.
+
+        Args:
+            segments: Original transcription segments including timing info
+            translated_segments: List of translated texts aligned to segments
+
+        Returns:
+            SRT formatted string
+        """
+        if not segments or not translated_segments:
+            return ""
+
+        max_len = min(len(segments), len(translated_segments))
+        lines: List[str] = []
+
+        for idx in range(max_len):
+            segment = segments[idx] or {}
+            text = translated_segments[idx] or ""
+
+            start = float(segment.get("start", 0.0) or 0.0)
+            end = float(segment.get("end", start + 2.0) or (start + 2.0))
+
+            lines.append(str(idx + 1))
+            lines.append(
+                f"{ExportService._format_srt_time(start)} --> "
+                f"{ExportService._format_srt_time(end)}"
+            )
+            lines.append(text.strip())
+            lines.append("")
+
+        return "\n".join(lines)
 
     @staticmethod
     def to_markdown(

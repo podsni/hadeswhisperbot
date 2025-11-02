@@ -1,7 +1,6 @@
 """Handlers for history, search, translate, and export commands."""
 
 import logging
-from io import BytesIO
 from typing import Optional
 
 from aiogram import Router, F
@@ -258,6 +257,7 @@ async def translate_command(
             text=last_record.transcript,
             target_language=target_lang,
             source_language=last_record.detected_language,
+            segments=last_record.segments,
         )
 
         # Save translation to database
@@ -266,12 +266,47 @@ async def translate_command(
             target_language=target_lang,
             translated_text=result.text,
             source_language=result.source_language,
+            translated_segments=result.segment_translations,
         )
 
         # Prepare response
         file_name = last_record.file_name or "Unknown"
         source_lang = LANGUAGE_CODES.get(result.source_language, result.source_language)
         target_lang_name = LANGUAGE_CODES[target_lang]
+
+        metadata = {
+            "file_name": file_name,
+            "source_language": source_lang,
+            "target_language": target_lang_name,
+            "provider": result.provider,
+        }
+
+        txt_content = ExportService.to_txt(result.text, metadata)
+        txt_file = BufferedInputFile(
+            txt_content.encode("utf-8"),
+            filename=f"{file_name}_translated_{target_lang}.txt",
+        )
+
+        translated_segments = result.segment_translations or []
+        if (
+            translated_segments
+            and last_record.segments
+            and len(translated_segments) == len(last_record.segments)
+        ):
+            srt_content = ExportService.to_srt_from_segments(
+                last_record.segments, translated_segments
+            )
+        else:
+            srt_content = ExportService.to_srt(result.text, last_record.duration)
+
+        srt_file: Optional[BufferedInputFile] = None
+        if srt_content.strip():
+            srt_file = BufferedInputFile(
+                srt_content.encode("utf-8"),
+                filename=f"{file_name}_translated_{target_lang}.srt",
+            )
+        else:
+            logger.info("Translated SRT content unavailable for %s.", file_name)
 
         response = (
             f"✅ **Translation Complete**\n\n"
@@ -293,6 +328,10 @@ async def translate_command(
                         text="📥 Download MD",
                         callback_data=f"translate_export:{last_record.id}:{target_lang}:md",
                     ),
+                    InlineKeyboardButton(
+                        text="📥 Download SRT",
+                        callback_data=f"translate_export:{last_record.id}:{target_lang}:srt",
+                    ),
                 ],
             ]
         )
@@ -300,26 +339,32 @@ async def translate_command(
         # Delete processing message
         await processing_msg.delete()
 
+        truncated_response = False
         # Send result (split if too long)
         if len(response) > 4000:
+            truncated_response = True
             await message.answer(response[:4000] + "...\n\n_(Message truncated)_")
-            # Send full text as file
-            file_content = ExportService.to_txt(
-                result.text,
-                metadata={
-                    "file_name": file_name,
-                    "source_language": source_lang,
-                    "target_language": target_lang_name,
-                    "provider": result.provider,
-                },
-            )
-            file = BufferedInputFile(
-                file_content.encode("utf-8"),
-                filename=f"{file_name}_translated_{target_lang}.txt",
-            )
-            await message.answer_document(file, caption="📄 Full translated text")
         else:
             await message.answer(response, reply_markup=keyboard)
+
+        # Always send translated TXT file
+        await message.answer_document(
+            txt_file,
+            caption="📄 Full translated text",
+        )
+
+        # Send translated SRT if available
+        if srt_file:
+            await message.answer_document(
+                srt_file,
+                caption="🎬 Subtitle SRT (translated)",
+            )
+
+        if truncated_response:
+            await message.answer(
+                "Pilih format unduhan untuk hasil terjemahan:",
+                reply_markup=keyboard,
+            )
 
     except Exception as e:
         logger.error(f"Translation failed: {e}", exc_info=True)
@@ -655,12 +700,31 @@ async def translate_export_callback(
         }
 
         # Generate content
+        translated_segments = translation.get("translated_segments")
+
         if format_type == "txt":
             content = ExportService.to_txt(translation["translated_text"], metadata)
         elif format_type == "md":
             content = ExportService.to_markdown(
                 translation["translated_text"], metadata
             )
+        elif format_type == "srt":
+            if (
+                translated_segments
+                and record.segments
+                and len(translated_segments) == len(record.segments)
+            ):
+                content = ExportService.to_srt_from_segments(
+                    record.segments, translated_segments
+                )
+            else:
+                content = ExportService.to_srt(
+                    translation["translated_text"], record.duration
+                )
+                if translated_segments and not record.segments:
+                    logger.info(
+                        "Translated segments available but original timing missing; using fallback SRT generation."
+                    )
         else:
             await query.answer("Unknown format", show_alert=True)
             return

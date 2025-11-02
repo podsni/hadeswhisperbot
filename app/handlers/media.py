@@ -341,6 +341,7 @@ async def _process_transcription_task(
                         model=model_name,
                         timestamp=datetime.utcnow().isoformat(),
                         processing_time=processing_time,
+                        segments=result.segments,
                     )
                     record_id = transcription_db.add_transcription(record)
                     logger.info(

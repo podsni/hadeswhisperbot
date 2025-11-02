@@ -1,11 +1,13 @@
 """Translation service for multi-language support."""
 
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import httpx
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+MAX_SEGMENT_TRANSLATIONS = 200
 
 
 # Language code mapping
@@ -46,6 +48,7 @@ class TranslationResult:
     source_language: str
     target_language: str
     provider: str
+    segment_translations: Optional[List[str]] = None
 
 
 class TranslationService:
@@ -83,6 +86,7 @@ class TranslationService:
         target_language: str,
         source_language: Optional[str] = None,
         provider: Optional[str] = None,
+        segments: Optional[List[Dict[str, Any]]] = None,
     ) -> TranslationResult:
         """
         Translate text to target language.
@@ -92,6 +96,7 @@ class TranslationService:
             target_language: Target language code (e.g., 'en', 'id')
             source_language: Source language code (auto-detect if None)
             provider: Preferred provider ('groq', 'together', 'libretranslate')
+            segments: Optional segment metadata for subtitle alignment
 
         Returns:
             TranslationResult object
@@ -103,33 +108,46 @@ class TranslationService:
                 f"Supported: {', '.join(LANGUAGE_CODES.keys())}"
             )
 
+        result: TranslationResult
+
         # Try providers in order
         if provider == "groq" and self.groq_api_key:
-            return await self._translate_with_groq(
+            result = await self._translate_with_groq(
                 text, target_language, source_language
             )
         elif provider == "together" and self.together_api_key:
-            return await self._translate_with_together(
+            result = await self._translate_with_together(
                 text, target_language, source_language
             )
         elif provider == "libretranslate":
-            return await self._translate_with_libretranslate(
+            result = await self._translate_with_libretranslate(
                 text, target_language, source_language
             )
         else:
             # Auto-select available provider
             if self.groq_api_key:
-                return await self._translate_with_groq(
+                result = await self._translate_with_groq(
                     text, target_language, source_language
                 )
             elif self.together_api_key:
-                return await self._translate_with_together(
+                result = await self._translate_with_together(
                     text, target_language, source_language
                 )
             else:
-                return await self._translate_with_libretranslate(
+                result = await self._translate_with_libretranslate(
                     text, target_language, source_language
                 )
+
+        segment_translations = await self._maybe_translate_segments(
+            base_result=result,
+            target_language=target_language,
+            fallback_source=source_language,
+            segments=segments,
+        )
+        if segment_translations:
+            result.segment_translations = segment_translations
+
+        return result
 
     async def _translate_with_groq(
         self, text: str, target_language: str, source_language: Optional[str] = None
@@ -271,6 +289,86 @@ class TranslationService:
                 target_language=target_language,
                 provider="libretranslate",
             )
+
+    async def _maybe_translate_segments(
+        self,
+        base_result: TranslationResult,
+        target_language: str,
+        fallback_source: Optional[str],
+        segments: Optional[List[Dict[str, Any]]],
+    ) -> Optional[List[str]]:
+        """
+        Translate individual subtitle segments to preserve timing.
+
+        Args:
+            base_result: Primary translation result
+            target_language: Target language code
+            fallback_source: Optional source language hint
+            segments: Original segment metadata with text/timestamps
+
+        Returns:
+            List of translated segment texts or None if unavailable
+        """
+        if not segments:
+            return None
+
+        if len(segments) > MAX_SEGMENT_TRANSLATIONS:
+            logger.warning(
+                "Skipping segment translations: %d segments exceed limit of %d.",
+                len(segments),
+                MAX_SEGMENT_TRANSLATIONS,
+            )
+            return None
+
+        segment_texts: List[str] = []
+        has_content = False
+        for segment in segments:
+            text = ""
+            if isinstance(segment, dict):
+                value = segment.get("text")
+                if isinstance(value, str):
+                    text = value.strip()
+            if text:
+                has_content = True
+            segment_texts.append(text)
+
+        if not has_content:
+            return None
+
+        provider = base_result.provider
+        effective_source = (
+            base_result.source_language
+            if base_result.source_language and base_result.source_language != "auto"
+            else fallback_source
+        )
+
+        translations: List[str] = []
+        for text in segment_texts:
+            if not text:
+                translations.append("")
+                continue
+
+            try:
+                if provider == "groq":
+                    translated = await self._translate_with_groq(
+                        text, target_language, effective_source
+                    )
+                elif provider == "together":
+                    translated = await self._translate_with_together(
+                        text, target_language, effective_source
+                    )
+                else:
+                    translated = await self._translate_with_libretranslate(
+                        text, target_language, effective_source
+                    )
+                translations.append(translated.text)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Segment translation failed via %s: %s", provider, exc, exc_info=True
+                )
+                translations.append("")
+
+        return translations or None
 
     async def _detect_language_groq(self, text: str) -> str:
         """Detect language using Groq API."""

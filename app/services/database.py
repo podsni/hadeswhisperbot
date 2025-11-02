@@ -29,6 +29,7 @@ class TranscriptionRecord:
     model: Optional[str] = None
     timestamp: Optional[str] = None
     processing_time: Optional[float] = None
+    segments: Optional[List[Dict[str, Any]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -65,6 +66,7 @@ class TranscriptionDatabase:
                     model TEXT,
                     timestamp TEXT NOT NULL,
                     processing_time REAL,
+                    segments_json TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -77,10 +79,26 @@ class TranscriptionDatabase:
                     source_language TEXT,
                     target_language TEXT NOT NULL,
                     translated_text TEXT NOT NULL,
+                    translated_segments_json TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (transcription_id) REFERENCES transcriptions(id)
                 )
             """)
+
+            # Apply schema migrations for backward compatibility
+            cursor.execute("PRAGMA table_info(transcriptions)")
+            transcription_columns = {row[1] for row in cursor.fetchall()}
+            if "segments_json" not in transcription_columns:
+                cursor.execute(
+                    "ALTER TABLE transcriptions ADD COLUMN segments_json TEXT"
+                )
+
+            cursor.execute("PRAGMA table_info(translations)")
+            translation_columns = {row[1] for row in cursor.fetchall()}
+            if "translated_segments_json" not in translation_columns:
+                cursor.execute(
+                    "ALTER TABLE translations ADD COLUMN translated_segments_json TEXT"
+                )
 
             # Create indexes for faster searches
             cursor.execute("""
@@ -126,12 +144,13 @@ class TranscriptionDatabase:
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            segments_json = json.dumps(record.segments, ensure_ascii=False) if record.segments else None
             cursor.execute(
                 """
                 INSERT INTO transcriptions
                 (user_id, chat_id, file_id, file_name, file_size, duration,
-                 transcript, detected_language, provider, model, timestamp, processing_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 transcript, detected_language, provider, model, timestamp, processing_time, segments_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     record.user_id,
@@ -146,6 +165,7 @@ class TranscriptionDatabase:
                     record.model,
                     record.timestamp,
                     record.processing_time,
+                    segments_json,
                 ),
             )
             conn.commit()
@@ -196,6 +216,7 @@ class TranscriptionDatabase:
                         model=row["model"],
                         timestamp=row["timestamp"],
                         processing_time=row["processing_time"],
+                        segments=self._parse_segments(row["segments_json"]),
                     )
                 )
 
@@ -271,6 +292,7 @@ class TranscriptionDatabase:
         target_language: str,
         translated_text: str,
         source_language: Optional[str] = None,
+        translated_segments: Optional[List[str]] = None,
     ) -> int:
         """
         Add a translation for a transcription.
@@ -286,13 +308,24 @@ class TranscriptionDatabase:
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            segments_json = (
+                json.dumps(translated_segments, ensure_ascii=False)
+                if translated_segments
+                else None
+            )
             cursor.execute(
                 """
                 INSERT INTO translations
-                (transcription_id, source_language, target_language, translated_text)
-                VALUES (?, ?, ?, ?)
+                (transcription_id, source_language, target_language, translated_text, translated_segments_json)
+                VALUES (?, ?, ?, ?, ?)
             """,
-                (transcription_id, source_language, target_language, translated_text),
+                (
+                    transcription_id,
+                    source_language,
+                    target_language,
+                    translated_text,
+                    segments_json,
+                ),
             )
             conn.commit()
             translation_id = cursor.lastrowid
@@ -323,7 +356,34 @@ class TranscriptionDatabase:
                 (transcription_id,),
             )
 
-            return [dict(row) for row in cursor.fetchall()]
+            results = []
+            for row in cursor.fetchall():
+                row_dict = dict(row)
+                segments_raw = row_dict.get("translated_segments_json")
+                if segments_raw:
+                    try:
+                        row_dict["translated_segments"] = json.loads(segments_raw)
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to parse translated segments JSON.")
+                        row_dict["translated_segments"] = None
+                else:
+                    row_dict["translated_segments"] = None
+                results.append(row_dict)
+
+            return results
+
+    @staticmethod
+    def _parse_segments(raw: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+        """Safely parse stored segment JSON."""
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return data
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse segments JSON.")
+        return None
 
     def export_history_json(self, user_id: int) -> str:
         """
